@@ -1,0 +1,301 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+
+use eframe::egui::{self, Color32, RichText, TextEdit};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct Config {
+    last_folder: Option<PathBuf>,
+    #[serde(default = "default_dark_theme")]
+    dark_theme: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self { last_folder: None, dark_theme: true }
+    }
+}
+
+fn default_dark_theme() -> bool {
+    true
+}
+
+struct ListFile {
+    path: PathBuf,
+    display_name: String,
+}
+
+struct App {
+    config_path: PathBuf,
+    config: Config,
+    user_lists: Vec<ListFile>,
+    other_lists: Vec<ListFile>,
+    selected: Option<PathBuf>,
+    editor_text: String,
+    status: String,
+    save_pending: bool,
+    last_edit: Option<Instant>,
+}
+
+impl App {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let config_path = app_directory().join("config.json");
+        let config = load_config(&config_path);
+        set_theme(&cc.egui_ctx, config.dark_theme);
+        let mut app = Self {
+            config_path,
+            config,
+            user_lists: Vec::new(),
+            other_lists: Vec::new(),
+            selected: None,
+            editor_text: String::new(),
+            status: "Выберите папку с листами".into(),
+            save_pending: false,
+            last_edit: None,
+        };
+
+        if let Some(folder) = app.config.last_folder.clone().filter(|p| p.is_dir()) {
+            app.scan_folder(&folder);
+        }
+        app
+    }
+
+    fn scan_folder(&mut self, folder: &Path) {
+        self.user_lists.clear();
+        self.other_lists.clear();
+        self.selected = None;
+        self.editor_text.clear();
+        self.save_pending = false;
+        self.last_edit = None;
+
+        match fs::read_dir(folder) {
+            Ok(entries) => {
+                let mut files: Vec<ListFile> = entries
+                    .filter_map(Result::ok)
+                    .filter_map(|entry| {
+                        let path = entry.path();
+                        if !path.is_file() || !has_txt_extension(&path) {
+                            return None;
+                        }
+                        Some(ListFile {
+                            display_name: entry.file_name().to_string_lossy().into_owned(),
+                            path,
+                        })
+                    })
+                    .collect();
+                files.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+                for file in files {
+                    if file.display_name.to_lowercase().contains("user") {
+                        self.user_lists.push(file);
+                    } else {
+                        self.other_lists.push(file);
+                    }
+                }
+                self.config.last_folder = Some(folder.to_path_buf());
+                save_config(&self.config_path, &self.config);
+                self.status = format!("Папка: {}", folder.display());
+            }
+            Err(error) => self.status = format!("Не удалось прочитать папку: {error}"),
+        }
+    }
+
+    fn open_file(&mut self, path: PathBuf) {
+        match fs::read_to_string(&path) {
+            Ok(contents) => {
+                self.editor_text = normalize(&contents);
+                self.selected = Some(path.clone());
+                self.save_pending = false;
+                self.last_edit = None;
+                self.status = format!("Открыт: {}", path.file_name().unwrap_or_default().to_string_lossy());
+            }
+            Err(error) => self.status = format!("Не удалось открыть файл: {error}"),
+        }
+    }
+
+    fn save_current(&mut self) {
+        if let Some(path) = &self.selected {
+            match fs::write(path, &self.editor_text) {
+                Ok(()) => self.status = "Изменения сохранены".into(),
+                Err(error) => self.status = format!("Ошибка сохранения: {error}"),
+            }
+        }
+    }
+
+    fn queue_save(&mut self) {
+        self.save_pending = true;
+        self.last_edit = Some(Instant::now());
+        self.status = "Изменения будут сохранены…".into();
+    }
+
+    fn save_when_idle(&mut self, ctx: &egui::Context) {
+        const SAVE_DELAY: Duration = Duration::from_millis(400);
+        if !self.save_pending {
+            return;
+        }
+        let elapsed = self.last_edit.map(|time| time.elapsed()).unwrap_or(SAVE_DELAY);
+        if elapsed >= SAVE_DELAY {
+            self.save_current();
+            self.save_pending = false;
+            self.last_edit = None;
+        } else {
+            ctx.request_repaint_after(SAVE_DELAY - elapsed);
+        }
+    }
+
+    fn list_section(ui: &mut egui::Ui, title: &str, files: &[(PathBuf, String)], selected: Option<&Path>) -> Option<PathBuf> {
+        ui.label(RichText::new(title).strong().color(Color32::from_rgb(124, 190, 255)));
+        let mut clicked = None;
+        if files.is_empty() {
+            ui.label(RichText::new("Нет файлов").weak());
+        }
+        for (path, name) in files {
+            if ui.selectable_label(selected == Some(path.as_path()), name).clicked() {
+                clicked = Some(path.clone());
+            }
+        }
+        clicked
+    }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::TopBottomPanel::top("top").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Выбрать папку").clicked() {
+                    let dialog = if let Some(folder) = &self.config.last_folder {
+                        rfd::FileDialog::new().set_directory(folder)
+                    } else {
+                        rfd::FileDialog::new()
+                    };
+                    if let Some(folder) = dialog.pick_folder() {
+                        self.scan_folder(&folder);
+                    }
+                }
+                ui.separator();
+                ui.label(&self.status);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = if self.config.dark_theme { "Светлая тема" } else { "Тёмная тема" };
+                    if ui.button(label).clicked() {
+                        self.config.dark_theme = !self.config.dark_theme;
+                        set_theme(ctx, self.config.dark_theme);
+                        save_config(&self.config_path, &self.config);
+                    }
+                });
+            });
+        });
+
+        let user_files: Vec<_> = self.user_lists.iter().map(|f| (f.path.clone(), f.display_name.clone())).collect();
+        let other_files: Vec<_> = self.other_lists.iter().map(|f| (f.path.clone(), f.display_name.clone())).collect();
+        let mut opened = None;
+        egui::SidePanel::left("files").resizable(true).default_width(235.0).show(ctx, |ui| {
+            ui.heading("Файлы .txt");
+            ui.separator();
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                opened = Self::list_section(ui, "User-листы", &user_files, self.selected.as_deref());
+                ui.add_space(14.0);
+                ui.separator();
+                ui.add_space(8.0);
+                if opened.is_none() {
+                    opened = Self::list_section(ui, "Прочие листы", &other_files, self.selected.as_deref());
+                } else {
+                    let _ = Self::list_section(ui, "Прочие листы", &other_files, self.selected.as_deref());
+                }
+            });
+        });
+        if let Some(path) = opened { self.open_file(path); }
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let name = self.selected.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy()).unwrap_or_else(|| "Файл не выбран".into());
+            ui.heading(name);
+            ui.label(RichText::new("Разрешены: a–z, A–Z, 0–9, -, ., _, *; пробел создаёт новую строку.").small().weak());
+            ui.separator();
+            if self.selected.is_some() {
+                let response = egui::ScrollArea::vertical()
+                    .id_salt("editor_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add(TextEdit::multiline(&mut self.editor_text)
+                            .font(egui::TextStyle::Monospace)
+                            .hint_text("example.org\n*.example.net")
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(24))
+                    })
+                    .inner;
+                if response.changed() {
+                    self.editor_text = normalize(&self.editor_text);
+                    self.queue_save();
+                }
+            } else {
+                ui.centered_and_justified(|ui| { ui.label("Выберите .txt файл слева"); });
+            }
+        });
+
+        self.save_when_idle(ctx);
+    }
+}
+
+fn has_txt_extension(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
+}
+
+fn normalize(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut previous_newline = true;
+    for character in input.chars() {
+        let newline = character == '\n' || character == '\r' || character == ' ';
+        if newline {
+            if !previous_newline { result.push('\n'); }
+            previous_newline = true;
+        } else if character.is_ascii_alphanumeric() || matches!(character, '-' | '.' | '_' | '*') {
+            result.push(character);
+            previous_newline = false;
+        }
+    }
+    result.trim_end_matches('\n').to_owned()
+}
+
+fn app_directory() -> PathBuf {
+    std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+fn load_config(path: &Path) -> Config {
+    fs::read_to_string(path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+}
+
+fn save_config(path: &Path, config: &Config) {
+    if let Ok(text) = serde_json::to_string_pretty(config) { let _ = fs::write(path, text); }
+}
+
+fn set_theme(ctx: &egui::Context, dark: bool) {
+    ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
+}
+
+fn main() -> eframe::Result {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 650.0]).with_min_inner_size([700.0, 450.0]),
+        ..Default::default()
+    };
+    eframe::run_native("FlowSeal — редактор user-листов", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize;
+
+    #[test]
+    fn replaces_spaces_and_removes_invalid_characters() {
+        assert_eq!(normalize("example.com bad@host! *.site"), "example.com\nbadhost\n*.site");
+    }
+
+    #[test]
+    fn removes_empty_lines() {
+        assert_eq!(normalize("\n\none.org\r\n   \r\ntwo_net\n"), "one.org\ntwo_net");
+    }
+}
