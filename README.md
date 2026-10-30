@@ -43,7 +43,7 @@
 <div align="center">
 
 <!-- Замени на реальный скриншот -->
-![Скриншот приложения](docs/screenshot.png)
+![img_1.png](img_1.png)
 
 </div>
 
