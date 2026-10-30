@@ -43,7 +43,7 @@
 <div align="center">
 
 <!-- Замени на реальный скриншот -->
-![img_1.png](img_1.png)
+![screen.png](screen.png)
 
 </div>
 
