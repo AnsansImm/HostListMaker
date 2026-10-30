@@ -112,10 +112,7 @@ impl App {
     fn open_file(&mut self, path: PathBuf) {
         match fs::read_to_string(&path) {
             Ok(contents) => {
-                self.editor_text = normalize(&contents);
-                if !self.editor_text.is_empty() {
-                    self.editor_text.push('\n');
-                }
+                self.editor_text = editable_text(&contents);
                 self.selected = Some(path.clone());
                 self.save_pending = false;
                 self.last_edit = None;
@@ -128,7 +125,9 @@ impl App {
 
     fn save_current(&mut self) {
         if let Some(path) = &self.selected {
-            match fs::write(path, &self.editor_text) {
+            // The editor keeps one empty line at the bottom for convenient input.
+            // It is intentionally not written to the list file.
+            match fs::write(path, normalize(&self.editor_text)) {
                 Ok(()) => self.status = "Изменения сохранены".into(),
                 Err(error) => self.status = format!("Ошибка сохранения: {error}"),
             }
@@ -247,7 +246,7 @@ impl eframe::App for App {
                     ctx.request_repaint();
                 }
                 if response.changed() {
-                    self.editor_text = normalize(&self.editor_text);
+                    self.editor_text = editable_text(&self.editor_text);
                     self.queue_save();
                 }
             } else {
@@ -288,6 +287,16 @@ fn normalize(input: &str) -> String {
         }
     }
     lines.join("\n")
+}
+
+/// Keeps a permanent input line after the last domain or comment.
+/// `normalize` is used when writing to disk, so that line never becomes a blank record in the file.
+fn editable_text(input: &str) -> String {
+    let mut text = normalize(input);
+    if !text.is_empty() {
+        text.push('\n');
+    }
+    text
 }
 
 fn app_directory() -> PathBuf {
@@ -332,7 +341,7 @@ fn main() -> eframe::Result {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize;
+    use super::{editable_text, normalize};
 
     #[test]
     fn replaces_spaces_and_removes_invalid_characters() {
@@ -350,5 +359,11 @@ mod tests {
             normalize("# Любой текст: @! $%^&* ()\nexample.org"),
             "# Любой текст: @! $%^&* ()\nexample.org"
         );
+    }
+
+    #[test]
+    fn keeps_an_input_line_outside_the_saved_content() {
+        assert_eq!(editable_text("example.org"), "example.org\n");
+        assert_eq!(normalize(&editable_text("example.org")), "example.org");
     }
 }
