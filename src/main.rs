@@ -42,6 +42,7 @@ struct App {
     status: String,
     save_pending: bool,
     last_edit: Option<Instant>,
+    cursor_to_new_line: bool,
 }
 
 impl App {
@@ -59,6 +60,7 @@ impl App {
             status: "Выберите папку с листами".into(),
             save_pending: false,
             last_edit: None,
+            cursor_to_new_line: false,
         };
 
         if let Some(folder) = app.config.last_folder.clone().filter(|p| p.is_dir()) {
@@ -74,6 +76,7 @@ impl App {
         self.editor_text.clear();
         self.save_pending = false;
         self.last_edit = None;
+        self.cursor_to_new_line = false;
 
         match fs::read_dir(folder) {
             Ok(entries) => {
@@ -110,9 +113,13 @@ impl App {
         match fs::read_to_string(&path) {
             Ok(contents) => {
                 self.editor_text = normalize(&contents);
+                if !self.editor_text.is_empty() {
+                    self.editor_text.push('\n');
+                }
                 self.selected = Some(path.clone());
                 self.save_pending = false;
                 self.last_edit = None;
+                self.cursor_to_new_line = true;
                 self.status = format!("Открыт: {}", path.file_name().unwrap_or_default().to_string_lossy());
             }
             Err(error) => self.status = format!("Не удалось открыть файл: {error}"),
@@ -214,20 +221,31 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             let name = self.selected.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy()).unwrap_or_else(|| "Файл не выбран".into());
             ui.heading(name);
-            ui.label(RichText::new("Разрешены: a–z, A–Z, 0–9, -, ., _, *; пробел создаёт новую строку.").small().weak());
+            ui.label(RichText::new("Домены: a–z, A–Z, 0–9, -, ., _, *; пробел создаёт новую строку. Строка с # — комментарий.").small().weak());
             ui.separator();
             if self.selected.is_some() {
+                let editor_id = ui.make_persistent_id("editor");
                 let response = egui::ScrollArea::vertical()
                     .id_salt("editor_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.add(TextEdit::multiline(&mut self.editor_text)
+                            .id(editor_id)
                             .font(egui::TextStyle::Monospace)
-                            .hint_text("example.org\n*.example.net")
+                            .hint_text("example.org\n# Мой комментарий\n*.example.net")
                             .desired_width(f32::INFINITY)
                             .desired_rows(24))
                     })
                     .inner;
+                if self.cursor_to_new_line {
+                    let mut state = egui::widgets::text_edit::TextEditState::load(ctx, editor_id).unwrap_or_default();
+                    let cursor = egui::text::CCursor::new(self.editor_text.chars().count());
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(cursor)));
+                    state.store(ctx, editor_id);
+                    response.request_focus();
+                    self.cursor_to_new_line = false;
+                    ctx.request_repaint();
+                }
                 if response.changed() {
                     self.editor_text = normalize(&self.editor_text);
                     self.queue_save();
@@ -246,19 +264,30 @@ fn has_txt_extension(path: &Path) -> bool {
 }
 
 fn normalize(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut previous_newline = true;
-    for character in input.chars() {
-        let newline = character == '\n' || character == '\r' || character == ' ';
-        if newline {
-            if !previous_newline { result.push('\n'); }
-            previous_newline = true;
-        } else if character.is_ascii_alphanumeric() || matches!(character, '-' | '.' | '_' | '*') {
-            result.push(character);
-            previous_newline = false;
+    let mut lines = Vec::new();
+    for source_line in input.replace('\r', "\n").lines() {
+        let line = source_line.trim_start_matches(char::is_whitespace);
+        if line.starts_with('#') {
+            // Comment lines deliberately retain every character after '#'.
+            lines.push(line.to_owned());
+            continue;
+        }
+
+        let mut domain = String::new();
+        for character in line.chars() {
+            if character == ' ' {
+                if !domain.is_empty() {
+                    lines.push(std::mem::take(&mut domain));
+                }
+            } else if character.is_ascii_alphanumeric() || matches!(character, '-' | '.' | '_' | '*') {
+                domain.push(character);
+            }
+        }
+        if !domain.is_empty() {
+            lines.push(domain);
         }
     }
-    result.trim_end_matches('\n').to_owned()
+    lines.join("\n")
 }
 
 fn app_directory() -> PathBuf {
@@ -313,5 +342,13 @@ mod tests {
     #[test]
     fn removes_empty_lines() {
         assert_eq!(normalize("\n\none.org\r\n   \r\ntwo_net\n"), "one.org\ntwo_net");
+    }
+
+    #[test]
+    fn preserves_comment_text() {
+        assert_eq!(
+            normalize("# Любой текст: @! $%^&* ()\nexample.org"),
+            "# Любой текст: @! $%^&* ()\nexample.org"
+        );
     }
 }
