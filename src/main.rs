@@ -3,6 +3,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -277,12 +278,27 @@ fn set_theme(ctx: &egui::Context, dark: bool) {
     ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
 }
 
+fn application_icon() -> Arc<egui::IconData> {
+    let image = image::load_from_memory(include_bytes!("../logo.png"))
+        .expect("logo.png must be a valid PNG")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    Arc::new(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
+}
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([980.0, 650.0]).with_min_inner_size([700.0, 450.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([980.0, 650.0])
+            .with_min_inner_size([700.0, 450.0])
+            .with_icon(application_icon()),
         ..Default::default()
     };
-    eframe::run_native("FlowSeal — редактор user-листов", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
+    eframe::run_native("Host List Maker", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
 }
 
 #[cfg(test)]
